@@ -1,0 +1,4 @@
+# Shared tooling for both CVPR 2026 tracks (Hugging Face data + submissions).
+datasets>=2.16.0
+huggingface_hub>=0.23.0
+numpy>=1.24.0
