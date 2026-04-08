@@ -15,7 +15,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-- **Hugging Face**: create an account and sign in (`huggingface-cli login`) if a dataset or submission flow requires it.
+- **Hugging Face**: create an account and sign in if a dataset or submission flow requires it. Newer `huggingface_hub` uses the **`hf`** CLI, not `huggingface-cli`: run `hf auth login`, or `python3 -m huggingface_hub.cli.hf auth login`. If you see `command not found`, add pip’s script dir to `PATH` (often `export PATH="$HOME/.local/bin:$PATH"`) or use the `python3 -m ...` form.
 - **Outputs / downloads**: keep large artifacts under `outputs/` or outside the repo; they are gitignored.
 
 ## Participating in both competitions

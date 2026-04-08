@@ -16,7 +16,10 @@ That repository is **gated**: log in on Hugging Face, open the dataset card, **a
 From the repository root (with `huggingface_hub` installed, e.g. `pip install -r requirements.txt`):
 
 1. Create a read token: https://huggingface.co/settings/tokens  
-2. `export HF_TOKEN=hf_...` (or run `huggingface-cli login`)  
+2. Authenticate **one** of these ways:
+   - `export HF_TOKEN=hf_...` for scripts, or  
+   - `hf auth login` (replacing the old `huggingface-cli login`), or  
+   - `python3 -m huggingface_hub.cli.hf auth login` if `hf` is not on your `PATH` (often fix with `export PATH="$HOME/.local/bin:$PATH"` after `pip install --user`).  
 3. Run:
 
 ```bash
