@@ -7,7 +7,7 @@ import argparse
 import os
 import sys
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import get_token, snapshot_download
 from huggingface_hub.utils import GatedRepoError
 
 
@@ -25,16 +25,23 @@ def main() -> None:
     )
     p.add_argument(
         "--token",
-        default=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"),
-        help="HF API token (or set HF_TOKEN / HUGGING_FACE_HUB_TOKEN).",
+        default=None,
+        help="HF API token. If omitted, uses HF_TOKEN / HUGGING_FACE_HUB_TOKEN or the token from `hf auth login` (~/.cache/huggingface/token).",
     )
     args = p.parse_args()
 
-    if not args.token:
+    token = (
+        args.token
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or get_token()
+    )
+    if not token:
         print(
-            "Error: no Hugging Face token. Request dataset access at "
-            "https://huggingface.co/datasets/Building3D/Building3D then run "
-            "`huggingface-cli login` or export HF_TOKEN=...",
+            "Error: no Hugging Face token. Run `hf auth login` (or "
+            "`python3 -m huggingface_hub.cli.hf auth login`), or set HF_TOKEN. "
+            "For Building3D, also request access at "
+            "https://huggingface.co/datasets/Building3D/Building3D",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -45,7 +52,7 @@ def main() -> None:
             repo_id=args.repo,
             repo_type="dataset",
             local_dir=args.local_dir,
-            token=args.token,
+            token=token,
             max_workers=4,
         )
     except GatedRepoError as e:

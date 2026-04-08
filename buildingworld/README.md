@@ -17,9 +17,8 @@ From the repository root (with `huggingface_hub` installed, e.g. `pip install -r
 
 1. Create a read token: https://huggingface.co/settings/tokens  
 2. Authenticate **one** of these ways:
-   - `export HF_TOKEN=hf_...` for scripts, or  
-   - `hf auth login` (replacing the old `huggingface-cli login`), or  
-   - `python3 -m huggingface_hub.cli.hf auth login` if `hf` is not on your `PATH` (often fix with `export PATH="$HOME/.local/bin:$PATH"` after `pip install --user`).  
+   - `hf auth login` (or `python3 -m huggingface_hub.cli.hf auth login`) — the download script reads the same saved token as the CLI, or  
+   - `export HF_TOKEN=hf_...` if you prefer env vars only.  
 3. Run:
 
 ```bash
