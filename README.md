@@ -25,7 +25,7 @@ pip install -r requirements.txt
 3. **S23DR** published rules: [Rules.md on the Space](https://huggingface.co/spaces/usm3d/S23DR2026/raw/main/Rules.md) (eligibility, prizes, data license, submission via the Space).
 4. **Data**
    - S23DR sampled set: [`usm3d/s23dr-2026-sampled_4096_v2`](https://huggingface.co/datasets/usm3d/s23dr-2026-sampled_4096_v2) — optional peek: `python s23dr/scripts/inspect_dataset.py`
-   - BuildingWorld: follow the BuildingWorld Space (organizers noted test data timing on the Space).
+   - Building3D (linked from the [reconstruction page](https://szusic.github.io/Building3D/reconstruction.html)): gated HF dataset [`Building3D/Building3D`](https://huggingface.co/datasets/Building3D/Building3D) — after access is granted, run `python3 buildingworld/scripts/download_building3d.py` (see [`buildingworld/README.md`](buildingworld/README.md)).
 5. **Submit** each entry through the corresponding Space; do not assume one submission covers both tracks.
 
 ## Quick links
