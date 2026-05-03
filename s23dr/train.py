@@ -4,8 +4,17 @@ Training script for RoofWireframeNet on S23DR 2026.
 
 Usage
 -----
+    # Start fresh
     python s23dr/train.py
-    python s23dr/train.py --epochs 50 --lr 1e-3 --batch-size 4 --split-debug
+
+    # Resume from last checkpoint (auto-detects outputs/checkpoints/last.pt)
+    python s23dr/train.py --resume
+
+    # Resume from a specific checkpoint
+    python s23dr/train.py --resume --ckpt-dir outputs/checkpoints
+
+    # Debug smoke test
+    python s23dr/train.py --epochs 5 --lr 1e-3 --batch-size 2 --split-debug
 """
 
 from __future__ import annotations
@@ -35,10 +44,23 @@ def parse_args():
     p.add_argument("--device",     type=str,   default="cpu")
     p.add_argument("--ckpt-dir",   type=str,   default="outputs/checkpoints")
     p.add_argument("--log-every",  type=int,   default=10)
-    # Load only a small number of samples for quick debugging
     p.add_argument("--split-debug", action="store_true",
                    help="Use only first 8 train samples for fast smoke test")
+    p.add_argument("--resume",     action="store_true",
+                   help="Resume from last.pt in --ckpt-dir if it exists")
     return p.parse_args()
+
+
+def _save(path: Path, epoch: int, model, optimizer, scheduler,
+          val_loss: float, args):
+    torch.save({
+        "epoch":     epoch,
+        "model":     model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "val_loss":  val_loss,
+        "args":      vars(args),
+    }, path)
 
 
 def train_one_epoch(model, loader, loss_fn, optimizer, device, log_every):
@@ -103,6 +125,9 @@ def main():
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    last_ckpt = ckpt_dir / "last.pt"
+    best_ckpt = ckpt_dir / "best.pt"
+
     print("Loading datasets…")
     train_ds = S23DRDataset(split="train",      n_points=args.n_points)
     val_ds   = S23DRDataset(split="validation", n_points=args.n_points)
@@ -124,17 +149,36 @@ def main():
         num_workers=args.n_workers, collate_fn=collate_fn,
     )
 
-    model   = RoofWireframeNet(n_queries=args.n_queries).to(device)
-    loss_fn = WireframeLoss()
+    model     = RoofWireframeNet(n_queries=args.n_queries).to(device)
+    loss_fn   = WireframeLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    start_epoch = 1
+    best_val    = float("inf")
+
+    # ---- resume --------------------------------------------------------
+    if args.resume and last_ckpt.exists():
+        ckpt = torch.load(last_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        start_epoch = ckpt["epoch"] + 1
+        best_val    = ckpt.get("val_loss", float("inf"))
+        # best_val may come from best.pt if it exists
+        if best_ckpt.exists():
+            best_val = torch.load(best_ckpt, map_location="cpu",
+                                  weights_only=False).get("val_loss", best_val)
+        print(f"Resumed from epoch {ckpt['epoch']}  "
+              f"(best_val={best_val:.4f}, continuing from epoch {start_epoch})")
+    elif args.resume:
+        print(f"No checkpoint found at {last_ckpt} — starting fresh.")
+    # --------------------------------------------------------------------
+
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {total_params:,} parameters")
+    print(f"Model: {total_params:,} parameters  device={device}")
 
-    best_val = float("inf")
-
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         t_start = time.time()
         train_loss = train_one_epoch(model, train_loader, loss_fn,
                                      optimizer, device, args.log_every)
@@ -146,16 +190,13 @@ def main():
               f"train={train_loss:.4f}  val={val_loss:.4f}  "
               f"lr={scheduler.get_last_lr()[0]:.2e}  ({elapsed:.1f}s)")
 
+        # Always save last checkpoint (enables resume)
+        _save(last_ckpt, epoch, model, optimizer, scheduler, val_loss, args)
+
         if val_loss < best_val:
             best_val = val_loss
-            ckpt = ckpt_dir / "best.pt"
-            torch.save({
-                "epoch": epoch,
-                "model": model.state_dict(),
-                "val_loss": val_loss,
-                "args": vars(args),
-            }, ckpt)
-            print(f"  ✓ saved {ckpt}")
+            _save(best_ckpt, epoch, model, optimizer, scheduler, val_loss, args)
+            print(f"  ✓ best checkpoint saved (val={val_loss:.4f})")
 
 
 if __name__ == "__main__":
