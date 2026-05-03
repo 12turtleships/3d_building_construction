@@ -85,6 +85,11 @@ class S23DRDataset(Dataset):
         gt_verts   = torch.from_numpy(r["gt_vertices"]).float()            # (V, 3)
         gt_edges   = torch.from_numpy(r["gt_edges"]).long()                # (E, 2)
         gt_classes = torch.from_numpy(r["gt_edge_classes"]).long()         # (E,)
+        gt_segs    = torch.from_numpy(r["gt_segments"]).float()            # (E, 2, 3)
+
+        # World-space denormalization: world = xyz_norm * scale + center
+        scale  = float(r["scale"])
+        center = torch.from_numpy(r["center"].astype(np.float32))          # (3,)
 
         return {
             "order_id":   r["order_id"],
@@ -96,6 +101,9 @@ class S23DRDataset(Dataset):
             "gt_verts":   gt_verts,
             "gt_edges":   gt_edges,
             "gt_classes": gt_classes,
+            "gt_segs":    gt_segs,
+            "scale":      scale,
+            "center":     center,
         }
 
 
@@ -114,4 +122,7 @@ def collate_fn(batch: list[dict]) -> dict[str, Any]:
         "gt_verts":   [b["gt_verts"]   for b in batch],
         "gt_edges":   [b["gt_edges"]   for b in batch],
         "gt_classes": [b["gt_classes"] for b in batch],
+        "gt_segs":    [b["gt_segs"]    for b in batch],
+        "scale":      [b["scale"]      for b in batch],
+        "center":     [b["center"]     for b in batch],
     }

@@ -97,6 +97,41 @@ Set runtime to **T4 GPU** (free) or **A100** (Colab Pro).
 | A100 (Colab Pro) | ~1.2 min | ~2 hrs |
 | Mac CPU | ~53 min | not viable |
 
+### Evaluate a checkpoint (HSS metric)
+
+Download `best.pt` from Colab to `outputs/checkpoints/best.pt`, then:
+
+```bash
+# Full validation set HSS evaluation
+python s23dr/scripts/evaluate.py --ckpt outputs/checkpoints/best.pt --device cpu
+
+# Quick check on 50 samples
+python s23dr/scripts/evaluate.py --ckpt outputs/checkpoints/best.pt --max-samples 50
+```
+
+**Evaluation metric**: HSS (Hausdorff Segment Score) — F1 of segment coverage at distance threshold τ=0.2.  
+Baseline model achieves HSS ~0.43 on the public test set.
+
+### Generate submission
+
+```bash
+# Full validation set submission (world-space coordinates)
+python s23dr/scripts/make_submission.py \
+    --ckpt outputs/checkpoints/best.pt \
+    --out  outputs/submission.json \
+    --n-points 4096
+
+# Quick smoke test
+python s23dr/scripts/make_submission.py \
+    --ckpt outputs/checkpoints/best.pt \
+    --out  /tmp/test_sub.json --max-samples 5
+```
+
+Output: `submission.json` with one record per sample:
+```json
+[{"order_id": "...", "wf_vertices": [[x,y,z],...], "wf_edges": [[i,j],...]}]
+```
+
 ---
 
 ## Shared setup
