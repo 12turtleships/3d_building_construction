@@ -7,11 +7,8 @@ Usage
     # Start fresh
     python s23dr/train.py
 
-    # Resume from last checkpoint (auto-detects outputs/checkpoints/last.pt)
+    # Resume — tries last.pt first, then best.pt
     python s23dr/train.py --resume
-
-    # Resume from a specific checkpoint
-    python s23dr/train.py --resume --ckpt-dir outputs/checkpoints
 
     # Debug smoke test
     python s23dr/train.py --epochs 5 --lr 1e-3 --batch-size 2 --split-debug
@@ -20,7 +17,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import os
 import time
 from pathlib import Path
 
@@ -47,8 +43,16 @@ def parse_args():
     p.add_argument("--split-debug", action="store_true",
                    help="Use only first 8 train samples for fast smoke test")
     p.add_argument("--resume",     action="store_true",
-                   help="Resume from last.pt in --ckpt-dir if it exists")
+                   help="Resume from last.pt (or best.pt if last.pt missing)")
     return p.parse_args()
+
+
+def _torch_load(path, map_location):
+    """torch.load compatible with both old (<2.0) and new (>=2.0) PyTorch."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 
 def _save(path: Path, epoch: int, model, optimizer, scheduler,
@@ -61,6 +65,46 @@ def _save(path: Path, epoch: int, model, optimizer, scheduler,
         "val_loss":  val_loss,
         "args":      vars(args),
     }, path)
+
+
+def _find_resume_ckpt(ckpt_dir: Path) -> tuple[Path | None, str]:
+    """Return (path, label) for the best available resume checkpoint."""
+    for fname in ("last.pt", "best.pt"):
+        p = ckpt_dir / fname
+        if p.exists():
+            return p, fname
+    return None, ""
+
+
+def _apply_resume(ckpt_path: Path, label: str, device,
+                  model, optimizer, scheduler, total_epochs: int):
+    """
+    Load checkpoint into model/optimizer/scheduler.
+    Handles old-format checkpoints that lack optimizer/scheduler state
+    by fast-forwarding the scheduler to the saved epoch.
+    Returns (start_epoch, best_val).
+    """
+    ckpt = _torch_load(ckpt_path, device)
+    model.load_state_dict(ckpt["model"])
+
+    if "optimizer" in ckpt:
+        optimizer.load_state_dict(ckpt["optimizer"])
+    # else: keep freshly initialised optimizer (learning rate will be off
+    # until scheduler corrects it, so fast-forward below)
+
+    if "scheduler" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler"])
+    else:
+        # Old checkpoint without scheduler state — fast-forward to match epoch
+        # so cosine-annealing LR is correct from this point.
+        for _ in range(ckpt["epoch"]):
+            scheduler.step()
+
+    start_epoch = ckpt["epoch"] + 1
+    best_val    = ckpt.get("val_loss", float("inf"))
+    print(f"Resumed from {label}  epoch={ckpt['epoch']}  "
+          f"val_loss={best_val:.4f}  → continuing from epoch {start_epoch}")
+    return start_epoch, best_val
 
 
 def train_one_epoch(model, loader, loss_fn, optimizer, device, log_every):
@@ -105,12 +149,11 @@ def evaluate(model, loader, loss_fn, device):
     model.eval()
     total_loss = 0.0
     for batch in loader:
-        xyz       = batch["xyz"].to(device)
-        vote_frac = batch["vote_frac"].to(device)
-        n_views   = batch["n_views"].to(device)
-        mask      = batch["mask"].to(device)
-        class_id  = batch["class_id"].to(device)
-        out = model(xyz, vote_frac, n_views, mask, class_id)
+        out = model(
+            batch["xyz"].to(device), batch["vote_frac"].to(device),
+            batch["n_views"].to(device), batch["mask"].to(device),
+            batch["class_id"].to(device),
+        )
         losses = loss_fn(
             out["pred_pos"], out["pred_conf"], out["edge_logits"],
             batch["gt_verts"], batch["gt_edges"], batch["gt_classes"],
@@ -157,23 +200,17 @@ def main():
     start_epoch = 1
     best_val    = float("inf")
 
-    # ---- resume --------------------------------------------------------
-    if args.resume and last_ckpt.exists():
-        ckpt = torch.load(last_ckpt, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        start_epoch = ckpt["epoch"] + 1
-        best_val    = ckpt.get("val_loss", float("inf"))
-        # best_val may come from best.pt if it exists
-        if best_ckpt.exists():
-            best_val = torch.load(best_ckpt, map_location="cpu",
-                                  weights_only=False).get("val_loss", best_val)
-        print(f"Resumed from epoch {ckpt['epoch']}  "
-              f"(best_val={best_val:.4f}, continuing from epoch {start_epoch})")
-    elif args.resume:
-        print(f"No checkpoint found at {last_ckpt} — starting fresh.")
-    # --------------------------------------------------------------------
+    if args.resume:
+        ckpt_path, label = _find_resume_ckpt(ckpt_dir)
+        if ckpt_path:
+            start_epoch, best_val = _apply_resume(
+                ckpt_path, label, device, model, optimizer, scheduler, args.epochs)
+            # If resumed from best.pt, best_val is already correct.
+            # If resumed from last.pt and best.pt also exists, use best.pt's val_loss.
+            if label == "last.pt" and best_ckpt.exists():
+                best_val = _torch_load(best_ckpt, "cpu").get("val_loss", best_val)
+        else:
+            print(f"No checkpoint found in {ckpt_dir} — starting fresh.")
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {total_params:,} parameters  device={device}")
@@ -190,7 +227,6 @@ def main():
               f"train={train_loss:.4f}  val={val_loss:.4f}  "
               f"lr={scheduler.get_last_lr()[0]:.2e}  ({elapsed:.1f}s)")
 
-        # Always save last checkpoint (enables resume)
         _save(last_ckpt, epoch, model, optimizer, scheduler, val_loss, args)
 
         if val_loss < best_val:
