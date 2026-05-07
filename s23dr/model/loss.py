@@ -36,13 +36,20 @@ class WireframeLoss(nn.Module):
                  w_vert: float = 5.0,
                  w_conf: float = 1.0,
                  w_edge: float = 2.0,
-                 n_edge_classes: int = 10) -> None:
+                 n_edge_classes: int = 10,
+                 no_edge_weight: float = 0.05) -> None:
         super().__init__()
         self.w_vert = w_vert
         self.w_conf = w_conf
         self.w_edge = w_edge
         self.n_edge_classes = n_edge_classes
         self.no_edge_class = n_edge_classes   # last class = "no edge"
+
+        # Down-weight the "no edge" class to counter the ~100:1 imbalance
+        # between negative pairs (K=64 → ~4096 pairs) and actual edges (~20-30).
+        edge_weight = torch.ones(n_edge_classes + 1)
+        edge_weight[-1] = no_edge_weight
+        self.register_buffer("_edge_weight", edge_weight)
 
     # ------------------------------------------------------------------
     def forward(self,
@@ -119,10 +126,13 @@ class WireframeLoss(nn.Module):
                     edge_target[pu_v, pv_v] = ec_v
                     edge_target[pv_v, pu_v] = ec_v   # symmetric
 
-            # Cross-entropy on all K×K pairs
+            # Cross-entropy on all K×K pairs (weighted to counter no-edge dominance)
             logits_flat = elogits.view(K * K, -1)
             target_flat = edge_target.view(K * K)
-            l_edge = F.cross_entropy(logits_flat, target_flat)
+            l_edge = F.cross_entropy(
+                logits_flat, target_flat,
+                weight=self._edge_weight.to(logits_flat.device),
+            )
             total_edge = total_edge + l_edge
 
         loss = (self.w_vert * total_vert / B
