@@ -91,8 +91,8 @@ class VertexDecoder(nn.Module):
         x = x.view(B * K, -1)
         feat = self.feat_mlp(x).view(B, K, self.feat_dim)  # (B, K, feat_dim)
 
-        # Heads
-        pos  = torch.sigmoid(self.pos_head(feat))           # (B, K, 3)  in [0,1]
+        # Heads — no activation on pos so the model can predict any coordinate sign
+        pos  = self.pos_head(feat)                          # (B, K, 3)
         conf = self.conf_head(feat).squeeze(-1)             # (B, K)
 
         return pos, conf, feat
