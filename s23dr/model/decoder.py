@@ -45,15 +45,27 @@ class VertexDecoder(nn.Module):
     """
     K query embeddings → K vertex proposals.
 
-    Each query is concatenated with the global backbone feature and passed
-    through an MLP to produce:
-      pos  : (B, K, 3)  — predicted vertex positions
-      conf : (B, K)     — logit for vertex existence (whether the slot is active)
-      feat : (B, K, feat_dim)  — per-vertex embedding for the edge predictor
+    Each query cross-attends to per-point backbone features so each slot can
+    focus on a specific region of the point cloud.  Vertex positions are
+    predicted as an attention-weighted mean of input xyz (coarse anchor) plus
+    a learned offset (fine refinement).
+
+    Inputs
+    ------
+    global_feat  : (B, global_dim)   max-pooled global descriptor
+    point_feats  : (B, N, point_dim) per-point features from backbone
+    xyz          : (B, N, 3)         normalised point positions
+
+    Outputs
+    -------
+    pos  : (B, K, 3)         predicted vertex positions
+    conf : (B, K)            vertex-existence logit
+    feat : (B, K, feat_dim)  per-vertex embedding for EdgePredictor
     """
 
     def __init__(self, n_queries: int = 64,
                  global_dim: int = 1024,
+                 point_dim: int = 256,
                  hidden_dim: int = 256,
                  feat_dim: int = 128) -> None:
         super().__init__()
@@ -63,37 +75,55 @@ class VertexDecoder(nn.Module):
         # Learned query embeddings
         self.query_embed = nn.Embedding(n_queries, hidden_dim)
 
-        # Query + global → per-vertex feature
+        # Cross-attention projections (queries → keys/values from point cloud)
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.k_proj = nn.Linear(point_dim,  hidden_dim, bias=False)
+        self.v_proj = nn.Linear(point_dim,  hidden_dim, bias=False)
+        self._attn_scale = hidden_dim ** -0.5
+
+        # Attended features + global → per-vertex feature
         self.feat_mlp = _mlp_head(
             [hidden_dim + global_dim, 512, 256],
             feat_dim,
         )
 
-        # Position head: feature → 3D position (sigmoid → [0,1], then rescale)
+        # Position head: refine from attention-weighted xyz anchor
         self.pos_head = nn.Linear(feat_dim, 3)
 
         # Confidence head: feature → scalar logit
         self.conf_head = nn.Linear(feat_dim, 1)
 
-    def forward(self, global_feat: torch.Tensor
+    def forward(self,
+                global_feat: torch.Tensor,   # (B, global_dim)
+                point_feats: torch.Tensor,   # (B, N, point_dim)
+                xyz:         torch.Tensor,   # (B, N, 3)
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        B = global_feat.shape[0]
+        B, N, _ = point_feats.shape
         K = self.n_queries
 
-        # (K, hidden_dim) → expand to (B, K, hidden_dim)
+        # Learned query embeddings: (B, K, hidden_dim)
         q = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
 
-        # Concat with global feat broadcast over K
-        g = global_feat.unsqueeze(1).expand(-1, K, -1)   # (B, K, global_dim)
-        x = torch.cat([q, g], dim=-1)                     # (B, K, hidden+global)
+        # Cross-attention: each query attends to all N points
+        q_a = self.q_proj(q)                                        # (B, K, H)
+        k_a = self.k_proj(point_feats)                              # (B, N, H)
+        v_a = self.v_proj(point_feats)                              # (B, N, H)
 
-        # Flatten, MLP, reshape
-        x = x.view(B * K, -1)
-        feat = self.feat_mlp(x).view(B, K, self.feat_dim)  # (B, K, feat_dim)
+        attn_logits = torch.bmm(q_a, k_a.transpose(1, 2)) * self._attn_scale  # (B, K, N)
+        attn_w = F.softmax(attn_logits, dim=-1)                     # (B, K, N)
 
-        # Heads — no activation on pos so the model can predict any coordinate sign
-        pos  = self.pos_head(feat)                          # (B, K, 3)
-        conf = self.conf_head(feat).squeeze(-1)             # (B, K)
+        attn_out  = torch.bmm(attn_w, v_a)                         # (B, K, H)
+        pos_anchor = torch.bmm(attn_w, xyz)                         # (B, K, 3) coarse position
+
+        # Per-vertex features: attended output + global context
+        g = global_feat.unsqueeze(1).expand(-1, K, -1)             # (B, K, global_dim)
+        x = torch.cat([attn_out, g], dim=-1)                        # (B, K, H+global_dim)
+
+        feat = self.feat_mlp(x.view(B * K, -1)).view(B, K, self.feat_dim)
+
+        # Fine-grained position offset added to coarse attention anchor
+        pos  = pos_anchor + self.pos_head(feat)                     # (B, K, 3)
+        conf = self.conf_head(feat).squeeze(-1)                     # (B, K)
 
         return pos, conf, feat
 
