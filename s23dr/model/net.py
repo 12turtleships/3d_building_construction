@@ -57,6 +57,7 @@ class RoofWireframeNet(nn.Module):
         self.vertex_decoder = VertexDecoder(
             n_queries=n_queries,
             global_dim=backbone_global_dim,
+            point_dim=self.backbone.point_dim,
             hidden_dim=256,
             feat_dim=vertex_feat_dim,
         )
@@ -89,10 +90,10 @@ class RoofWireframeNet(nn.Module):
         ], dim=-1)                                       # (B, N, 11)
 
         # Backbone
-        global_feat, _ = self.backbone(xyz, feats)       # (B, 1024), (B, N, 256)
+        global_feat, point_feat = self.backbone(xyz, feats)   # (B, 1024), (B, N, 256)
 
-        # Vertex proposals
-        pred_pos, pred_conf, vert_feat = self.vertex_decoder(global_feat)
+        # Vertex proposals (cross-attends to per-point features for localization)
+        pred_pos, pred_conf, vert_feat = self.vertex_decoder(global_feat, point_feat, xyz)
         # (B,K,3), (B,K), (B,K,feat_dim)
 
         # Edge predictions
