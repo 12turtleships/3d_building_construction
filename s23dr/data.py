@@ -82,14 +82,16 @@ class S23DRDataset(Dataset):
             r["class_id"][sel].astype(np.int64))                            # (N,)
 
         # --- targets (always full, not subsampled) ---
-        gt_verts   = torch.from_numpy(r["gt_vertices"]).float()            # (V, 3)
         gt_edges   = torch.from_numpy(r["gt_edges"]).long()                # (E, 2)
         gt_classes = torch.from_numpy(r["gt_edge_classes"]).long()         # (E,)
         gt_segs    = torch.from_numpy(r["gt_segments"]).float()            # (E, 2, 3)
 
         # World-space denormalization: world = xyz_norm * scale + center
+        # gt_vertices is stored in world space; convert to normalised space so
+        # pred_pos (which lives in xyz_norm space) can be directly compared.
         scale  = float(r["scale"])
         center = torch.from_numpy(r["center"].astype(np.float32))          # (3,)
+        gt_verts = (torch.from_numpy(r["gt_vertices"]).float() - center) / scale  # (V, 3)
 
         return {
             "order_id":   r["order_id"],
