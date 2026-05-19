@@ -22,6 +22,7 @@ from .primitives import fit_best_primitive
 
 def reconstruct(
     xyz: np.ndarray,                         # (N, 3) normalised
+    valid_mask: np.ndarray | None = None,    # (N,) bool — dataset "mask" field
     class_id: np.ndarray | None = None,      # (N,) optional semantic labels
     wall_class_ids: set[int] | None = None,  # which IDs = wall/eave
     z_roof_pct: float = 35.0,               # z-percentile threshold for roof pts
@@ -39,6 +40,7 @@ def reconstruct(
     # ── Step 1: floor plan footprint ─────────────────────────────────────────
     footprint = extract_footprint(
         xyz,
+        valid_mask=valid_mask,
         class_id=class_id,
         wall_class_ids=wall_class_ids,
         regularise=regularise_footprint,
@@ -83,13 +85,14 @@ def reconstruct(
 
 def reconstruct_to_segments(
     xyz: np.ndarray,
+    valid_mask: np.ndarray | None = None,
     class_id: np.ndarray | None = None,
     **kwargs,
 ) -> np.ndarray:
     """
     Convenience wrapper returning (E, 2, 3) segment array for hss().
     """
-    verts, edges = reconstruct(xyz, class_id=class_id, **kwargs)
+    verts, edges = reconstruct(xyz, valid_mask=valid_mask, class_id=class_id, **kwargs)
     if len(edges) == 0 or len(verts) == 0:
         return np.zeros((0, 2, 3), dtype=np.float32)
     segs = np.array([[verts[i], verts[j]] for i, j in edges], dtype=np.float32)
