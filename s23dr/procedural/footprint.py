@@ -22,6 +22,7 @@ from shapely.geometry import Polygon
 
 def extract_footprint(
     xyz: np.ndarray,                          # (N, 3)
+    valid_mask: np.ndarray | None = None,     # (N,) bool — use dataset "mask" field
     class_id: np.ndarray | None = None,       # (N,) optional semantic labels
     wall_class_ids: set[int] | None = None,   # which IDs count as wall/eave
     z_lo_pct: float = 10.0,                   # lower z percentile for wall band
@@ -30,6 +31,12 @@ def extract_footprint(
     regularise: bool = True,
 ) -> Polygon:
     """Return a 2-D Shapely Polygon representing the building footprint."""
+
+    # --- restrict to valid (non-background) points first ----------------------
+    if valid_mask is not None and valid_mask.any():
+        xyz = xyz[valid_mask.astype(bool)]
+        if class_id is not None:
+            class_id = class_id[valid_mask.astype(bool)]
 
     # --- select wall-like points -----------------------------------------------
     if class_id is not None and wall_class_ids:
@@ -42,7 +49,7 @@ def extract_footprint(
         pts = xyz[(z >= lo) & (z <= hi)]
 
     if len(pts) < 4:
-        pts = xyz  # fallback to all points
+        pts = xyz  # fallback to all valid points
 
     xy = pts[:, :2]
 
