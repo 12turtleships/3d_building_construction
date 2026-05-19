@@ -22,7 +22,9 @@ from shapely.geometry import Polygon
 
 def extract_footprint(
     xyz: np.ndarray,                          # (N, 3)
-    valid_mask: np.ndarray | None = None,     # (N,) bool — use dataset "mask" field
+    valid_mask: np.ndarray | None = None,     # (N,) bool — dataset "mask" field (unused here)
+    vote_frac: np.ndarray | None = None,      # (N,) float — per-point view-agreement score
+    vote_thresh: float = 0.3,                 # keep points with vote_frac >= this
     class_id: np.ndarray | None = None,       # (N,) optional semantic labels
     wall_class_ids: set[int] | None = None,   # which IDs count as wall/eave
     z_lo_pct: float = 10.0,                   # lower z percentile for wall band
@@ -32,11 +34,15 @@ def extract_footprint(
 ) -> Polygon:
     """Return a 2-D Shapely Polygon representing the building footprint."""
 
-    # --- restrict to valid (non-background) points first ----------------------
-    if valid_mask is not None and valid_mask.any():
-        xyz = xyz[valid_mask.astype(bool)]
-        if class_id is not None:
-            class_id = class_id[valid_mask.astype(bool)]
+    # --- restrict to high-confidence (voted) points ---------------------------
+    # vote_frac > 0 means multiple aerial views agreed this point is a real
+    # surface; context / background points typically have vote_frac = 0.
+    if vote_frac is not None:
+        voted = vote_frac >= vote_thresh
+        if voted.sum() >= 4:
+            xyz = xyz[voted]
+            if class_id is not None:
+                class_id = class_id[voted]
 
     # --- select wall-like points -----------------------------------------------
     if class_id is not None and wall_class_ids:
@@ -49,7 +55,7 @@ def extract_footprint(
         pts = xyz[(z >= lo) & (z <= hi)]
 
     if len(pts) < 4:
-        pts = xyz  # fallback to all valid points
+        pts = xyz  # fallback
 
     xy = pts[:, :2]
 
