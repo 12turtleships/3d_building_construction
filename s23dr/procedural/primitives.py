@@ -260,6 +260,13 @@ def fit_best_primitive(xyz: np.ndarray, footprint: Polygon) -> RoofPrimitive:
     planes = ransac_planes(xyz, n_planes=4)
     roof_type = classify_roof_type(planes)
 
+    # Override: large z-range signals a pitched roof even if RANSAC found only
+    # one dominant plane (sparse SfM points cluster on edges, not on faces).
+    if len(xyz) >= 5:
+        z_range = float(np.percentile(xyz[:, 2], 90) - np.percentile(xyz[:, 2], 10))
+        if roof_type in ("flat", "shed") and z_range > 0.15:
+            roof_type = "hip" if len(planes) >= 3 else "gable"
+
     prim = _TYPE_MAP.get(roof_type, FlatRoof)()
     if not prim.fit(xyz, footprint):
         prim = FlatRoof()
