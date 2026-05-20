@@ -38,6 +38,18 @@ def reconstruct(
     edges    : list of (i, j) index pairs
     """
 
+    # ── Step 0: restrict to high-confidence points for all processing ────────
+    # vote_frac >= 0.3 isolates the target building; background/context points
+    # have near-zero vote_frac and corrupt z_thresh and plane fitting if kept.
+    vote_thresh = 0.3
+    if vote_frac is not None:
+        voted = vote_frac >= vote_thresh
+        if voted.sum() >= 10:
+            xyz = xyz[voted]
+            if class_id is not None:
+                class_id = class_id[voted]
+            vote_frac = None   # already filtered; no need to re-filter in extract_footprint
+
     # ── Step 1: floor plan footprint ─────────────────────────────────────────
     footprint = extract_footprint(
         xyz,
