@@ -26,6 +26,8 @@ def reconstruct(
     vote_frac: np.ndarray | None = None,     # (N,) float — dataset "vote_frac" field
     valid_mask: np.ndarray | None = None,    # (N,) bool — kept for API compat
     class_id: np.ndarray | None = None,      # (N,) optional semantic labels
+    source: np.ndarray | None = None,        # (N,) uint8 — dataset "source" field
+    target_source: int = 1,                  # value in source[] that marks target building
     wall_class_ids: set[int] | None = None,  # which IDs = wall/eave
     z_roof_pct: float = 55.0,               # unused after preprocessing; kept for API compat
     regularise_footprint: bool = True,
@@ -39,7 +41,20 @@ def reconstruct(
     edges    : list of (i, j) index pairs
     """
 
-    # ── Step 0a: vote_frac filter ─────────────────────────────────────────────
+    # ── Step 0a: source filter (target building isolation) ───────────────────
+    # The dataset "source" field is a binary label. If source==target_source
+    # marks the target building's own points, filtering to those gives a clean
+    # per-building point cloud without neighbouring buildings or ground context.
+    if source is not None:
+        src_mask = source == target_source
+        if src_mask.sum() >= 10:
+            xyz = xyz[src_mask]
+            if vote_frac is not None:
+                vote_frac = vote_frac[src_mask]
+            if class_id is not None:
+                class_id = class_id[src_mask]
+
+    # ── Step 0b: vote_frac filter ─────────────────────────────────────────────
     vote_thresh = 0.3
     if vote_frac is not None:
         voted = vote_frac >= vote_thresh
@@ -48,10 +63,7 @@ def reconstruct(
             if class_id is not None:
                 class_id = class_id[voted]
 
-    # ── Step 0b: surface normal segmentation ─────────────────────────────────
-    # Estimate per-point normals, remove ground (horizontal at low z) and
-    # walls/facades (vertical normals). Then select the cluster of remaining
-    # points nearest to the XY origin (scene is centred on the target building).
+    # ── Step 0c: surface normal segmentation ─────────────────────────────────
     xyz = extract_roof_points(xyz)
 
     # ── Step 1: floor plan footprint from roof-surface points ─────────────────
