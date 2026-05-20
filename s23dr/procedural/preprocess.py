@@ -46,7 +46,7 @@ def extract_roof_points(
     wall_pitch_thresh: float = 55.0,     # normals with pitch > this → wall → remove
     ground_pitch_thresh: float = 20.0,   # near-horizontal normals at low z → ground
     ground_pct: float = 30.0,            # z-percentile cutoff for ground detection
-    xy_radius: float = 0.55,             # keep only points within this XY distance from origin
+    xy_radius: float = 0.38,             # keep only points within this XY distance from origin
 ) -> np.ndarray:
     """
     Return roof-candidate points by removing ground and wall/facade points,
@@ -86,6 +86,8 @@ def extract_roof_points(
         return xyz
 
     # ── 4. XY origin filter — isolate target building ─────────────────────────
+    # GT wireframe for sample 0 spans XY ≤ 0.26; xy_radius=0.38 gives ~0.12
+    # margin while excluding far neighbours (which reach XY=0.86).
     xy_dist = np.sqrt(roof[:, 0] ** 2 + roof[:, 1] ** 2)
     nearby = roof[xy_dist <= xy_radius]
     return nearby if len(nearby) >= 10 else roof

@@ -55,16 +55,13 @@ def reconstruct(
     xyz = extract_roof_points(xyz)
 
     # ── Step 1: floor plan footprint from roof-surface points ─────────────────
-    # Use the upper 50th-percentile z points of the preprocessed cloud for the
-    # convex hull. Neighbouring buildings tend to be shorter than the target
-    # building (scene is centred on it), so restricting to high-z points shrinks
-    # the hull to the target building's roof surface and tightens the footprint.
+    # xyz is now XY-filtered (target building only) — use all points for hull.
     footprint = extract_footprint(
         xyz,
         class_id=class_id if wall_class_ids else None,
         wall_class_ids=wall_class_ids,
         regularise=regularise_footprint,
-        z_lo_pct=50.0,
+        z_lo_pct=0.0,
     )
 
     # ── Step 2: decompose into rectangular sections ───────────────────────────
