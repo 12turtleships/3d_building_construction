@@ -46,15 +46,21 @@ def extract_roof_points(
     wall_pitch_thresh: float = 55.0,     # normals with pitch > this → wall → remove
     ground_pitch_thresh: float = 20.0,   # near-horizontal normals at low z → ground
     ground_pct: float = 30.0,            # z-percentile cutoff for ground detection
+    xy_radius: float = 0.55,             # keep only points within this XY distance from origin
 ) -> np.ndarray:
     """
-    Return roof-candidate points by removing ground and wall/facade points.
+    Return roof-candidate points by removing ground and wall/facade points,
+    then restricting to the target building's XY neighbourhood.
 
     Steps
     -----
     1. Estimate surface normals.
     2. Remove walls  (pitch > wall_pitch_thresh  ≈ 55°).
     3. Remove ground (pitch < ground_pitch_thresh ≈ 20° AND z in lower z-band).
+    4. Keep only points within xy_radius of the scene origin. The dataset
+       centres xyz_norm on the target building; GT segments span ≈ ±0.29,
+       so 0.55 safely captures the whole building while excluding neighbours
+       that sit at XY > 0.5 in the normalised coordinate frame.
     """
     if len(xyz) < 20:
         return xyz
@@ -68,8 +74,6 @@ def extract_roof_points(
     is_wall = pitch_deg > wall_pitch_thresh
 
     # ── 3. Remove ground ─────────────────────────────────────────────────────
-    # Use a conservative 30th z-percentile so only the lowest ground layer is
-    # removed; intermediate z points (terraces, lower roof sections) are kept.
     z = xyz[:, 2]
     z_low_thresh = np.percentile(z, ground_pct)
     is_ground = (z < z_low_thresh) & (pitch_deg < ground_pitch_thresh)
@@ -77,8 +81,11 @@ def extract_roof_points(
     roof = xyz[~is_wall & ~is_ground]
 
     if len(roof) < 10:
-        roof = xyz[~is_wall]   # fallback: remove walls only
+        roof = xyz[~is_wall]
     if len(roof) < 10:
         return xyz
 
-    return roof
+    # ── 4. XY origin filter — isolate target building ─────────────────────────
+    xy_dist = np.sqrt(roof[:, 0] ** 2 + roof[:, 1] ** 2)
+    nearby = roof[xy_dist <= xy_radius]
+    return nearby if len(nearby) >= 10 else roof
