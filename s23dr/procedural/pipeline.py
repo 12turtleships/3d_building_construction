@@ -18,6 +18,7 @@ from shapely.geometry import Point
 from .footprint import extract_footprint
 from .decompose import decompose_footprint
 from .primitives import fit_best_primitive
+from .preprocess import extract_roof_points
 
 
 def reconstruct(
@@ -26,7 +27,7 @@ def reconstruct(
     valid_mask: np.ndarray | None = None,    # (N,) bool — kept for API compat
     class_id: np.ndarray | None = None,      # (N,) optional semantic labels
     wall_class_ids: set[int] | None = None,  # which IDs = wall/eave
-    z_roof_pct: float = 35.0,               # z-percentile threshold for roof pts
+    z_roof_pct: float = 55.0,               # unused after preprocessing; kept for API compat
     regularise_footprint: bool = True,
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """
@@ -38,9 +39,7 @@ def reconstruct(
     edges    : list of (i, j) index pairs
     """
 
-    # ── Step 0: restrict to high-confidence points for all processing ────────
-    # vote_frac >= 0.3 isolates the target building; background/context points
-    # have near-zero vote_frac and corrupt z_thresh and plane fitting if kept.
+    # ── Step 0a: vote_frac filter ─────────────────────────────────────────────
     vote_thresh = 0.3
     if vote_frac is not None:
         voted = vote_frac >= vote_thresh
@@ -48,15 +47,21 @@ def reconstruct(
             xyz = xyz[voted]
             if class_id is not None:
                 class_id = class_id[voted]
-            vote_frac = None   # already filtered; no need to re-filter in extract_footprint
 
-    # ── Step 1: floor plan footprint ─────────────────────────────────────────
+    # ── Step 0b: surface normal segmentation ─────────────────────────────────
+    # Estimate per-point normals, remove ground (horizontal at low z) and
+    # walls/facades (vertical normals). Then select the cluster of remaining
+    # points nearest to the XY origin (scene is centred on the target building).
+    xyz = extract_roof_points(xyz)
+
+    # ── Step 1: floor plan footprint from roof-surface points ─────────────────
+    # xyz is now roof-only → use all points for the hull (z_lo_pct=0)
     footprint = extract_footprint(
         xyz,
-        vote_frac=vote_frac,
-        class_id=class_id,
+        class_id=class_id if wall_class_ids else None,
         wall_class_ids=wall_class_ids,
         regularise=regularise_footprint,
+        z_lo_pct=0.0,   # preprocessing already selected roof points
     )
 
     # ── Step 2: decompose into rectangular sections ───────────────────────────
@@ -67,17 +72,10 @@ def reconstruct(
     all_edges: list[tuple[int, int]] = []
     v_offset = 0
 
-    z_thresh = float(np.percentile(xyz[:, 2], z_roof_pct))
-
     for section in sections:
-        # Points inside this section footprint above the roof threshold
-        roof_mask = _points_in_polygon(xyz[:, :2], section) & (xyz[:, 2] >= z_thresh)
-        roof_pts = xyz[roof_mask]
-
-        if len(roof_pts) < 10:
-            # Fall back: all points inside section
-            in_mask = _points_in_polygon(xyz[:, :2], section)
-            roof_pts = xyz[in_mask]
+        # All preprocessed points inside this section are roof-surface points
+        in_mask = _points_in_polygon(xyz[:, :2], section)
+        roof_pts = xyz[in_mask]
 
         if len(roof_pts) < 5:
             roof_pts = xyz   # last resort: use all
