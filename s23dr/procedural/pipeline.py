@@ -26,7 +26,7 @@ def reconstruct(
     valid_mask: np.ndarray | None = None,    # (N,) bool — kept for API compat
     class_id: np.ndarray | None = None,      # (N,) optional semantic labels
     wall_class_ids: set[int] | None = None,  # which IDs = wall/eave
-    z_roof_pct: float = 35.0,               # z-percentile threshold for roof pts
+    z_roof_pct: float = 55.0,               # z-percentile threshold for roof pts
     regularise_footprint: bool = True,
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """

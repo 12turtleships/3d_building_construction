@@ -3,8 +3,9 @@ Extract a 2-D floor-plan footprint from a normalised point cloud.
 
 Strategy
 --------
-1. Select "wall-band" points — the z band between the 10th and 60th
-   percentile (roughly: not ground, not high roof peak).
+1. Select roof-surface points — the top z-percentile band (default: z >= 55th
+   percentile). This isolates the dominant roof structure rather than a
+   wall-band that mixes ground and multiple buildings.
 2. Project to XY and compute the 2-D convex hull.
 3. Regularise to a minimum-area rotated rectangle so downstream
    primitive fitting works on a clean outline.
@@ -22,21 +23,19 @@ from shapely.geometry import Polygon
 
 def extract_footprint(
     xyz: np.ndarray,                          # (N, 3)
-    valid_mask: np.ndarray | None = None,     # (N,) bool — dataset "mask" field (unused here)
+    valid_mask: np.ndarray | None = None,     # (N,) bool — kept for API compat (unused)
     vote_frac: np.ndarray | None = None,      # (N,) float — per-point view-agreement score
     vote_thresh: float = 0.3,                 # keep points with vote_frac >= this
     class_id: np.ndarray | None = None,       # (N,) optional semantic labels
     wall_class_ids: set[int] | None = None,   # which IDs count as wall/eave
-    z_lo_pct: float = 10.0,                   # lower z percentile for wall band
-    z_hi_pct: float = 60.0,                   # upper z percentile for wall band
+    z_lo_pct: float = 55.0,                   # take points above this z percentile
+    z_hi_pct: float = 60.0,                   # unused (kept for API compat)
     simplify_tolerance: float = 0.01,
     regularise: bool = True,
 ) -> Polygon:
     """Return a 2-D Shapely Polygon representing the building footprint."""
 
     # --- restrict to high-confidence (voted) points ---------------------------
-    # vote_frac > 0 means multiple aerial views agreed this point is a real
-    # surface; context / background points typically have vote_frac = 0.
     if vote_frac is not None:
         voted = vote_frac >= vote_thresh
         if voted.sum() >= 4:
@@ -44,15 +43,17 @@ def extract_footprint(
             if class_id is not None:
                 class_id = class_id[voted]
 
-    # --- select wall-like points -----------------------------------------------
+    # --- select roof-surface points (top z) ------------------------------------
+    # Using the upper z percentile isolates the dominant roof structure.
+    # A wall-band (middle z) fails when the scene contains multiple buildings
+    # or ground context, as it inflates the footprint to span the whole scene.
     if class_id is not None and wall_class_ids:
         mask = np.isin(class_id, list(wall_class_ids))
         pts = xyz[mask]
     else:
         z = xyz[:, 2]
         lo = np.percentile(z, z_lo_pct)
-        hi = np.percentile(z, z_hi_pct)
-        pts = xyz[(z >= lo) & (z <= hi)]
+        pts = xyz[z >= lo]
 
     if len(pts) < 4:
         pts = xyz  # fallback
