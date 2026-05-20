@@ -28,8 +28,8 @@ def extract_footprint(
     vote_thresh: float = 0.3,                 # keep points with vote_frac >= this
     class_id: np.ndarray | None = None,       # (N,) optional semantic labels
     wall_class_ids: set[int] | None = None,   # which IDs count as wall/eave
-    z_lo_pct: float = 55.0,                   # take points above this z percentile
-    z_hi_pct: float = 60.0,                   # unused (kept for API compat)
+    z_lo_pct: float = 0.0,                    # min z percentile (0 = use all points)
+    z_hi_pct: float = 100.0,                  # unused (kept for API compat)
     simplify_tolerance: float = 0.01,
     regularise: bool = True,
 ) -> Polygon:
