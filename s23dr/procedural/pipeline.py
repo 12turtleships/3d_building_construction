@@ -31,6 +31,9 @@ def reconstruct(
     wall_class_ids: set[int] | None = None,  # which IDs = wall/eave
     z_roof_pct: float = 55.0,               # unused after preprocessing; kept for API compat
     regularise_footprint: bool = True,
+    min_edge_len: float = 0.02,             # drop edges shorter than this (normalised)
+    support_radius: float = 0.04,           # tube radius for point-support check
+    min_support: int = 3,                   # min roof points inside tube to keep edge
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """
     Full pipeline: point cloud → wireframe vertices + edges.
@@ -41,7 +44,7 @@ def reconstruct(
     edges    : list of (i, j) index pairs
     """
 
-    # ── Step 0a: source filter (target building isolation) ───────────────────
+    # ── Step 0a: source filter (target building isolation) ─────────────────────
     # The dataset "source" field is a binary label. If source==target_source
     # marks the target building's own points, filtering to those gives a clean
     # per-building point cloud without neighbouring buildings or ground context.
@@ -54,7 +57,7 @@ def reconstruct(
             if class_id is not None:
                 class_id = class_id[src_mask]
 
-    # ── Step 0b: vote_frac filter ─────────────────────────────────────────────
+    # ── Step 0b: vote_frac filter ──────────────────────────────────────────────────
     vote_thresh = 0.3
     if vote_frac is not None:
         voted = vote_frac >= vote_thresh
@@ -63,7 +66,7 @@ def reconstruct(
             if class_id is not None:
                 class_id = class_id[voted]
 
-    # ── Step 0c: surface normal segmentation ─────────────────────────────────
+    # ── Step 0c: surface normal segmentation ───────────────────────────────────
     xyz = extract_roof_points(xyz)
 
     # ── Step 1: floor plan footprint from roof-surface points ─────────────────
@@ -79,7 +82,7 @@ def reconstruct(
     # ── Step 2: decompose into rectangular sections ───────────────────────────
     sections = decompose_footprint(footprint)
 
-    # ── Steps 3 & 4: fit primitive per section, collect wireframe ─────────────
+    # ── Steps 3 & 4: fit primitive per section, collect wireframe ──────────────
     all_verts: list[np.ndarray] = []
     all_edges: list[tuple[int, int]] = []
     v_offset = 0
@@ -103,6 +106,15 @@ def reconstruct(
         return np.zeros((0, 3), dtype=np.float32), []
 
     vertices = np.vstack(all_verts).astype(np.float32)
+
+    # ── Step 5: edge pruning ───────────────────────────────────────────────────
+    all_edges = _prune_edges(
+        vertices, all_edges, xyz,
+        min_len=min_edge_len,
+        support_radius=support_radius,
+        min_support=min_support,
+    )
+
     return vertices, all_edges
 
 
@@ -142,3 +154,51 @@ def _points_in_polygon(xy: np.ndarray, polygon) -> np.ndarray:
     for i in np.where(rough)[0]:
         mask[i] = polygon.contains(Point(float(xy[i, 0]), float(xy[i, 1])))
     return mask
+
+
+def _prune_edges(
+    vertices: np.ndarray,
+    edges: list[tuple[int, int]],
+    roof_pts: np.ndarray,
+    min_len: float = 0.02,
+    support_radius: float = 0.04,
+    min_support: int = 3,
+) -> list[tuple[int, int]]:
+    """
+    Remove low-quality edges by two criteria applied in order:
+
+    1. Minimum length: edges shorter than *min_len* are phantom artifacts
+       from near-duplicate vertices (tiny section footprints, shared corners).
+
+    2. Point support: for each edge [A, B] compute the distance from every
+       preprocessed roof point to the segment.  If fewer than *min_support*
+       points fall within *support_radius* of the segment, the edge has no
+       point-cloud evidence and is dropped.  This removes template-geometry
+       lines that don't correspond to any real architectural edge.
+    """
+    kept: list[tuple[int, int]] = []
+    has_pts = len(roof_pts) >= min_support
+
+    for i, j in edges:
+        a = vertices[i]
+        b = vertices[j]
+
+        # ── filter 1: minimum length ──────────────────────────────────────
+        seg_len = float(np.linalg.norm(b - a))
+        if seg_len < min_len:
+            continue
+
+        # ── filter 2: point support ───────────────────────────────────────
+        if has_pts:
+            ab = b - a
+            ab_len_sq = float(ab @ ab)
+            # project each point onto the segment parameter t in [0, 1]
+            t = np.clip(((roof_pts - a) @ ab) / ab_len_sq, 0.0, 1.0)  # (N,)
+            closest = a + t[:, None] * ab                               # (N, 3)
+            dists = np.linalg.norm(roof_pts - closest, axis=1)          # (N,)
+            if int((dists < support_radius).sum()) < min_support:
+                continue
+
+        kept.append((i, j))
+
+    return kept
