@@ -2,18 +2,23 @@
 Point cloud preprocessing for roof wireframe extraction.
 
 extract_roof_points(xyz)
-    → roof-candidate points after removing ground and wall/facade points.
+    → roof-candidate points after removing ground points and restricting
+      to the target building's XY neighbourhood.
 
 Pipeline
 --------
 1. Estimate per-point surface normals via k-NN PCA (vectorised SVD).
-2. Remove walls / facades — near-vertical normals (pitch > wall_pitch_thresh).
-3. Remove ground — RANSAC-fit one dominant plane to the near-horizontal
+2. Remove ground — RANSAC-fit one dominant plane to the near-horizontal
    point subset, then remove all near-horizontal points within eps of that
    plane. Using a fitted plane (rather than a flat z-threshold) handles
    sloped terrain correctly.
-4. Restrict to the target building's XY neighbourhood (scene is centred on
+3. Restrict to the target building's XY neighbourhood (scene is centred on
    the target building).
+
+Note: the wall-pitch filter (near-vertical normal removal) was removed.
+On sparse source-filtered clouds (~758 pts) noisy k-NN normals cause
+87%+ of valid roof points to be misclassified as walls, collapsing recall.
+Ground removal + XY radius filter alone are sufficient.
 """
 
 from __future__ import annotations
@@ -73,37 +78,29 @@ def _ransac_ground_plane(pts: np.ndarray,
 def extract_roof_points(
     xyz: np.ndarray,
     k_normal: int = 12,
-    wall_pitch_thresh: float = 70.0,   # normals with pitch > this → wall → remove
     ground_pitch_thresh: float = 20.0, # near-horizontal normals → ground candidates
     ground_eps: float = 0.04,          # RANSAC inlier distance for ground plane
     xy_radius: float = 0.38,           # keep only points within this XY dist from origin
 ) -> np.ndarray:
     """
-    Return roof-candidate points by removing ground and wall/facade points,
-    then restricting to the target building's XY neighbourhood.
+    Return roof-candidate points by removing ground, then restricting to
+    the target building's XY neighbourhood.
 
     Steps
     -----
     1. Estimate surface normals.
-    2. Remove walls  (pitch > wall_pitch_thresh ≈ 55°).
-    3. Detect ground plane via RANSAC on near-horizontal points, then remove
+    2. Detect ground plane via RANSAC on near-horizontal points, then remove
        near-horizontal inliers. Using a fitted plane handles sloped terrain.
-    4. Keep only points within xy_radius of the scene origin.
+    3. Keep only points within xy_radius of the scene origin.
     """
     if len(xyz) < 20:
         return xyz
 
-    # ── 1. Surface normals ────────────────────────────────────────────────────
+    # ── 1. Surface normals (needed for ground detection) ──────────────────────
     normals = estimate_normals(xyz, k=k_normal)
     pitch_deg = np.degrees(np.arccos(np.clip(np.abs(normals[:, 2]), 0.0, 1.0)))
 
-    # ── 2. Remove walls ───────────────────────────────────────────────────────
-    is_wall = pitch_deg > wall_pitch_thresh
-
-    # ── 3. RANSAC ground plane ────────────────────────────────────────────────
-    # Fit one dominant plane to the near-horizontal point subset. Handles
-    # sloped terrain: a tilted ground surface has consistent near-horizontal
-    # normals that RANSAC resolves into one plane regardless of z level.
+    # ── 2. RANSAC ground plane ────────────────────────────────────────────────
     horizontal = pitch_deg < ground_pitch_thresh
     h_pts = xyz[horizontal]
 
@@ -121,14 +118,12 @@ def extract_roof_points(
         z_thresh = np.percentile(xyz[:, 2], 30)
         is_ground = (xyz[:, 2] < z_thresh) & horizontal
 
-    roof = xyz[~is_wall & ~is_ground]
+    roof = xyz[~is_ground]
 
-    if len(roof) < 10:
-        roof = xyz[~is_wall]
     if len(roof) < 10:
         return xyz
 
-    # ── 4. XY origin filter — isolate target building ─────────────────────────
+    # ── 3. XY origin filter — isolate target building ─────────────────────────
     xy_dist = np.sqrt(roof[:, 0] ** 2 + roof[:, 1] ** 2)
     nearby = roof[xy_dist <= xy_radius]
     return nearby if len(nearby) >= 10 else roof
