@@ -24,7 +24,6 @@ Default tau = 0.2 (in normalised coordinate space where scene ≈ unit cube).
 from __future__ import annotations
 
 import numpy as np
-import torch
 
 
 # ------------------------------------------------------------------
@@ -101,12 +100,12 @@ def hss(
 
 # ------------------------------------------------------------------
 def decode_to_segments(
-    vertices: torch.Tensor,   # (V, 3)
-    edges:    torch.Tensor,   # (E, 2)
+    vertices,   # (V, 3)  torch.Tensor or np.ndarray
+    edges,      # (E, 2)  torch.Tensor or np.ndarray
 ) -> np.ndarray:
     """Convert (vertices, edges) wireframe to segment array (E, 2, 3)."""
     if len(edges) == 0:
         return np.zeros((0, 2, 3), dtype=np.float32)
-    v = vertices.cpu().numpy()
-    e = edges.cpu().numpy()
+    v = vertices.cpu().numpy() if hasattr(vertices, "cpu") else np.asarray(vertices)
+    e = edges.cpu().numpy()    if hasattr(edges,    "cpu") else np.asarray(edges)
     return np.stack([v[e[:, 0]], v[e[:, 1]]], axis=1).astype(np.float32)

@@ -73,7 +73,7 @@ def _ransac_ground_plane(pts: np.ndarray,
 def extract_roof_points(
     xyz: np.ndarray,
     k_normal: int = 12,
-    wall_pitch_thresh: float = 55.0,   # normals with pitch > this → wall → remove
+    wall_pitch_thresh: float = 70.0,   # normals with pitch > this → wall → remove
     ground_pitch_thresh: float = 20.0, # near-horizontal normals → ground candidates
     ground_eps: float = 0.04,          # RANSAC inlier distance for ground plane
     xy_radius: float = 0.38,           # keep only points within this XY dist from origin
