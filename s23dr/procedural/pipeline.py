@@ -1,13 +1,24 @@
 """
 End-to-end procedural roof reconstruction pipeline.
 
-reconstruct(xyz, class_id)
+reconstruct(xyz, ...)
     → (vertices (V,3), edges list-of-(i,j))
 
-reconstruct_to_segments(xyz, class_id)
+reconstruct_to_segments(xyz, ...)
     → segments (E, 2, 3)   — ready for hss()
 
 The pipeline runs entirely in normalised coordinate space (xyz_norm).
+
+Architecture (CSG lower-envelope)
+----------------------------------
+0. Source + vote_frac filters
+1. Ground removal (RANSAC plane on near-horizontal normals)
+2. XY-radius filter (isolate target building)
+3. Multi-plane RANSAC → N roof face planes
+4. Footprint: XY convex hull of filtered points
+5. Lower-envelope CSG: pairwise plane intersections clipped to footprint
+   → ridge / hip / valley edges + eave perimeter
+6. Edge pruning: min-length + point-support
 """
 
 from __future__ import annotations
@@ -15,25 +26,31 @@ from __future__ import annotations
 import numpy as np
 from shapely.geometry import Point
 
-from .footprint import extract_footprint
-from .decompose import decompose_footprint
-from .primitives import fit_best_primitive
 from .preprocess import extract_roof_points
+from .segment import segment_roof
+from .csg import lower_envelope_wireframe
+from .footprint import extract_footprint
 
 
 def reconstruct(
-    xyz: np.ndarray,                         # (N, 3) normalised
-    vote_frac: np.ndarray | None = None,     # (N,) float — dataset "vote_frac" field
-    valid_mask: np.ndarray | None = None,    # (N,) bool — kept for API compat
-    class_id: np.ndarray | None = None,      # (N,) optional semantic labels
-    source: np.ndarray | None = None,        # (N,) uint8 — dataset "source" field
-    target_source: int = 1,                  # value in source[] that marks target building
-    wall_class_ids: set[int] | None = None,  # which IDs = wall/eave
-    z_roof_pct: float = 55.0,               # unused after preprocessing; kept for API compat
+    xyz: np.ndarray,                       # (N, 3) normalised
+    vote_frac: np.ndarray | None = None,   # (N,) float
+    valid_mask: np.ndarray | None = None,  # (N,) bool — kept for API compat
+    class_id: np.ndarray | None = None,    # (N,) optional semantic labels
+    source: np.ndarray | None = None,      # (N,) uint8 — dataset "source" field
+    target_source: int = 1,
+    wall_class_ids: set[int] | None = None,
+    z_roof_pct: float = 55.0,             # unused; kept for API compat
     regularise_footprint: bool = True,
-    min_edge_len: float = 0.02,             # drop edges shorter than this (normalised)
-    support_radius: float = 0.04,           # tube radius for point-support check
-    min_support: int = 2,                   # min roof points inside tube to keep edge
+    min_edge_len: float = 0.02,
+    support_radius: float = 0.04,
+    min_support: int = 2,
+    # CSG / segmentation params
+    max_planes: int = 8,
+    plane_eps: float = 0.03,
+    min_plane_inliers: int = 8,
+    merge_angle_deg: float = 15.0,   # merge faces with normals within this angle
+    merge_dist: float = 0.05,        # merge faces whose points lie within this of each other
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """
     Full pipeline: point cloud → wireframe vertices + edges.
@@ -44,10 +61,7 @@ def reconstruct(
     edges    : list of (i, j) index pairs
     """
 
-    # ── Step 0a: source filter (target building isolation) ─────────────────────
-    # The dataset "source" field is a binary label. If source==target_source
-    # marks the target building's own points, filtering to those gives a clean
-    # per-building point cloud without neighbouring buildings or ground context.
+    # ── Step 0a: source filter ────────────────────────────────────────────────
     if source is not None:
         src_mask = source == target_source
         if src_mask.sum() >= 10:
@@ -57,65 +71,65 @@ def reconstruct(
             if class_id is not None:
                 class_id = class_id[src_mask]
 
-    # ── Step 0b: vote_frac filter ──────────────────────────────────────────────────
-    vote_thresh = 0.3
+    # ── Step 0b: vote_frac filter ─────────────────────────────────────────────
     if vote_frac is not None:
-        voted = vote_frac >= vote_thresh
+        voted = vote_frac >= 0.3
         if voted.sum() >= 10:
             xyz = xyz[voted]
             if class_id is not None:
                 class_id = class_id[voted]
 
-    # ── Step 0c: surface normal segmentation ───────────────────────────────────
-    xyz = extract_roof_points(xyz)
-
-    # ── Step 1: floor plan footprint from roof-surface points ─────────────────
-    # xyz is now XY-filtered (target building only) — use all points for hull.
-    footprint = extract_footprint(
-        xyz,
-        class_id=class_id if wall_class_ids else None,
-        wall_class_ids=wall_class_ids,
-        regularise=regularise_footprint,
-        z_lo_pct=0.0,
-    )
-
-    # ── Step 2: decompose into rectangular sections ───────────────────────────
-    sections = decompose_footprint(footprint)
-
-    # ── Steps 3 & 4: fit primitive per section, collect wireframe ──────────────
-    all_verts: list[np.ndarray] = []
-    all_edges: list[tuple[int, int]] = []
-    v_offset = 0
-
-    for section in sections:
-        # All preprocessed points inside this section are roof-surface points
-        in_mask = _points_in_polygon(xyz[:, :2], section)
-        roof_pts = xyz[in_mask]
-
-        if len(roof_pts) < 5:
-            roof_pts = xyz   # last resort: use all
-
-        prim = fit_best_primitive(roof_pts, section)
-        verts, edges = prim.wireframe()
-
-        all_verts.append(verts)
-        all_edges.extend((i + v_offset, j + v_offset) for i, j in edges)
-        v_offset += len(verts)
-
-    if not all_verts:
+    # ── Step 1: footprint + save full cloud for edge support ─────────────────
+    # Footprint uses source+vote filtered cloud before any spatial clipping
+    # so eave/corner points are not stripped.
+    xyz_full = xyz.copy()   # kept for point-support check in edge pruning
+    footprint = extract_footprint(xyz_full, regularise=regularise_footprint,
+                                  z_lo_pct=0.0)
+    if footprint is None or footprint.is_empty or footprint.area < 1e-6:
         return np.zeros((0, 3), dtype=np.float32), []
 
-    vertices = np.vstack(all_verts).astype(np.float32)
+    # ── Step 0c: ground removal + XY filter → roof-face candidate points ────
+    # extract_roof_points: RANSAC ground removal (capped at 40th z-pct to
+    # protect ridge pts) + XY radius clip.  Used only for plane fitting.
+    xyz = extract_roof_points(xyz)
+    if len(xyz) < 5:
+        return np.zeros((0, 3), dtype=np.float32), []
 
-    # ── Step 5: edge pruning ───────────────────────────────────────────────────
-    all_edges = _prune_edges(
-        vertices, all_edges, xyz,
+    # ── Step 2: multi-plane RANSAC + adjacent-face merging ───────────────────
+    # fit_roof_planes may over-segment (one face → multiple RANSAC hits due to
+    # noise); merge_coplanar collapses nearly-parallel planes whose inlier sets
+    # are spatially consistent into a single SVD-refitted representative plane.
+    planes = segment_roof(
+        xyz,
+        max_planes=max_planes,
+        min_inliers=min_plane_inliers,
+        eps=plane_eps,
+        angle_thresh_deg=merge_angle_deg,
+        dist_thresh=merge_dist,
+    )
+
+    if not planes:
+        # Fallback: treat entire cloud as one flat plane
+        z_med = float(np.median(xyz[:, 2]))
+        planes = [{'n': np.array([0.0, 0.0, 1.0]), 'd': z_med, 'pts': xyz}]
+
+    # ── Step 3: CSG lower-envelope wireframe ─────────────────────────────────
+    vertices, edges = lower_envelope_wireframe(planes, footprint)
+
+    if len(vertices) == 0:
+        return np.zeros((0, 3), dtype=np.float32), []
+
+    # ── Step 4: edge pruning ──────────────────────────────────────────────────
+    # Use xyz_full (pre-ground-removal) so eave edges aren't pruned for having
+    # no support in the ground-removed cloud.
+    edges = _prune_edges(
+        vertices, edges, xyz_full,
         min_len=min_edge_len,
         support_radius=support_radius,
         min_support=min_support,
     )
 
-    return vertices, all_edges
+    return vertices, edges
 
 
 def reconstruct_to_segments(
@@ -125,36 +139,17 @@ def reconstruct_to_segments(
     class_id: np.ndarray | None = None,
     **kwargs,
 ) -> np.ndarray:
-    """
-    Convenience wrapper returning (E, 2, 3) segment array for hss().
-    """
+    """Convenience wrapper → (E, 2, 3) segment array for hss()."""
     verts, edges = reconstruct(xyz, vote_frac=vote_frac, valid_mask=valid_mask,
                                class_id=class_id, **kwargs)
     if len(edges) == 0 or len(verts) == 0:
         return np.zeros((0, 2, 3), dtype=np.float32)
-    segs = np.array([[verts[i], verts[j]] for i, j in edges], dtype=np.float32)
-    return segs
+    return np.array([[verts[i], verts[j]] for i, j in edges], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _points_in_polygon(xy: np.ndarray, polygon) -> np.ndarray:
-    """
-    Return boolean mask: which rows of xy fall inside *polygon*.
-    Uses a fast bounding-box pre-filter then exact Shapely test.
-    """
-    minx, miny, maxx, maxy = polygon.bounds
-    rough = (
-        (xy[:, 0] >= minx) & (xy[:, 0] <= maxx) &
-        (xy[:, 1] >= miny) & (xy[:, 1] <= maxy)
-    )
-    mask = rough.copy()
-    for i in np.where(rough)[0]:
-        mask[i] = polygon.contains(Point(float(xy[i, 0]), float(xy[i, 1])))
-    return mask
-
 
 def _prune_edges(
     vertices: np.ndarray,
@@ -162,20 +157,9 @@ def _prune_edges(
     roof_pts: np.ndarray,
     min_len: float = 0.02,
     support_radius: float = 0.04,
-    min_support: int = 3,
+    min_support: int = 2,
 ) -> list[tuple[int, int]]:
-    """
-    Remove low-quality edges by two criteria applied in order:
-
-    1. Minimum length: edges shorter than *min_len* are phantom artifacts
-       from near-duplicate vertices (tiny section footprints, shared corners).
-
-    2. Point support: for each edge [A, B] compute the distance from every
-       preprocessed roof point to the segment.  If fewer than *min_support*
-       points fall within *support_radius* of the segment, the edge has no
-       point-cloud evidence and is dropped.  This removes template-geometry
-       lines that don't correspond to any real architectural edge.
-    """
+    """Drop short edges and edges with insufficient point-cloud support."""
     kept: list[tuple[int, int]] = []
     has_pts = len(roof_pts) >= min_support
 
@@ -183,19 +167,17 @@ def _prune_edges(
         a = vertices[i]
         b = vertices[j]
 
-        # ── filter 1: minimum length ──────────────────────────────────────
-        seg_len = float(np.linalg.norm(b - a))
-        if seg_len < min_len:
+        if float(np.linalg.norm(b - a)) < min_len:
             continue
 
-        # ── filter 2: point support ───────────────────────────────────────
         if has_pts:
             ab = b - a
             ab_len_sq = float(ab @ ab)
-            # project each point onto the segment parameter t in [0, 1]
-            t = np.clip(((roof_pts - a) @ ab) / ab_len_sq, 0.0, 1.0)  # (N,)
-            closest = a + t[:, None] * ab                               # (N, 3)
-            dists = np.linalg.norm(roof_pts - closest, axis=1)          # (N,)
+            if ab_len_sq < 1e-12:
+                continue
+            t = np.clip(((roof_pts - a) @ ab) / ab_len_sq, 0.0, 1.0)
+            closest = a + t[:, None] * ab
+            dists = np.linalg.norm(roof_pts - closest, axis=1)
             if int((dists < support_radius).sum()) < min_support:
                 continue
 

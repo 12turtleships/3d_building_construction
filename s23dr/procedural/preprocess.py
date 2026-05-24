@@ -104,15 +104,21 @@ def extract_roof_points(
     horizontal = pitch_deg < ground_pitch_thresh
     h_pts = xyz[horizontal]
 
+    # Ground points are near-horizontal AND in the lower z-range.
+    # Capping at the 40th z-percentile prevents the RANSAC plane from
+    # matching ridge / flat-top points whose k-NN normals average to
+    # near-horizontal (both slopes cancelling out at peaks).
+    z_ground_ceil = float(np.percentile(xyz[:, 2], 40))
+
     is_ground = np.zeros(len(xyz), dtype=bool)
     if len(h_pts) >= 15:
         result = _ransac_ground_plane(h_pts, eps=ground_eps)
         if result is not None:
             gn, gd = result
             dists = np.abs(xyz @ gn - gd)
-            # Remove only points that are BOTH near the plane AND near-horizontal
-            # — this avoids stripping pitched eave points at the same elevation.
-            is_ground = (dists < ground_eps) & horizontal
+            # Must be: near the fitted plane, near-horizontal, AND in the
+            # lower 40% of the z-range (never strip ridge or flat-top pts).
+            is_ground = (dists < ground_eps) & horizontal & (xyz[:, 2] <= z_ground_ceil)
     else:
         # Fallback: conservative z-percentile
         z_thresh = np.percentile(xyz[:, 2], 30)
