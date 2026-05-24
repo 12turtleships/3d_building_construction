@@ -24,10 +24,10 @@ Architecture (CSG lower-envelope)
 from __future__ import annotations
 
 import numpy as np
-from shapely.geometry import MultiPoint, Point
+from shapely.geometry import Point
 
 from .preprocess import extract_roof_points
-from .segment import fit_roof_planes
+from .segment import segment_roof
 from .csg import lower_envelope_wireframe
 from .footprint import extract_footprint
 
@@ -49,6 +49,8 @@ def reconstruct(
     max_planes: int = 8,
     plane_eps: float = 0.03,
     min_plane_inliers: int = 8,
+    merge_angle_deg: float = 15.0,   # merge faces with normals within this angle
+    merge_dist: float = 0.05,        # merge faces whose points lie within this of each other
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """
     Full pipeline: point cloud → wireframe vertices + edges.
@@ -77,25 +79,33 @@ def reconstruct(
             if class_id is not None:
                 class_id = class_id[voted]
 
-    # ── Step 0c: ground removal + XY filter ──────────────────────────────────
-    # extract_roof_points removes ground (RANSAC) and clips to XY radius.
-    # No wall filter — on sparse clouds wall-pitch classification is too noisy.
-    xyz = extract_roof_points(xyz)
-
-    if len(xyz) < 5:
-        return np.zeros((0, 3), dtype=np.float32), []
-
-    # ── Step 1: footprint (XY convex hull) ───────────────────────────────────
-    footprint = _convex_footprint(xyz)
+    # ── Step 1: footprint + save full cloud for edge support ─────────────────
+    # Footprint uses source+vote filtered cloud before any spatial clipping
+    # so eave/corner points are not stripped.
+    xyz_full = xyz.copy()   # kept for point-support check in edge pruning
+    footprint = extract_footprint(xyz_full, regularise=regularise_footprint,
+                                  z_lo_pct=0.0)
     if footprint is None or footprint.is_empty or footprint.area < 1e-6:
         return np.zeros((0, 3), dtype=np.float32), []
 
-    # ── Step 2: multi-plane RANSAC segmentation ───────────────────────────────
-    planes = fit_roof_planes(
+    # ── Step 0c: ground removal + XY filter → roof-face candidate points ────
+    # extract_roof_points: RANSAC ground removal (capped at 40th z-pct to
+    # protect ridge pts) + XY radius clip.  Used only for plane fitting.
+    xyz = extract_roof_points(xyz)
+    if len(xyz) < 5:
+        return np.zeros((0, 3), dtype=np.float32), []
+
+    # ── Step 2: multi-plane RANSAC + adjacent-face merging ───────────────────
+    # fit_roof_planes may over-segment (one face → multiple RANSAC hits due to
+    # noise); merge_coplanar collapses nearly-parallel planes whose inlier sets
+    # are spatially consistent into a single SVD-refitted representative plane.
+    planes = segment_roof(
         xyz,
         max_planes=max_planes,
         min_inliers=min_plane_inliers,
         eps=plane_eps,
+        angle_thresh_deg=merge_angle_deg,
+        dist_thresh=merge_dist,
     )
 
     if not planes:
@@ -110,8 +120,10 @@ def reconstruct(
         return np.zeros((0, 3), dtype=np.float32), []
 
     # ── Step 4: edge pruning ──────────────────────────────────────────────────
+    # Use xyz_full (pre-ground-removal) so eave edges aren't pruned for having
+    # no support in the ground-removed cloud.
     edges = _prune_edges(
-        vertices, edges, xyz,
+        vertices, edges, xyz_full,
         min_len=min_edge_len,
         support_radius=support_radius,
         min_support=min_support,
@@ -138,18 +150,6 @@ def reconstruct_to_segments(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _convex_footprint(xyz: np.ndarray):
-    """Convex hull of the XY projection of xyz."""
-    from shapely.geometry import MultiPoint
-    pts = MultiPoint(xyz[:, :2].tolist())
-    hull = pts.convex_hull
-    if hull.geom_type == 'Polygon':
-        return hull
-    if hull.geom_type == 'LineString':
-        return hull.buffer(0.01)   # degenerate: inflate thin line
-    return None
-
 
 def _prune_edges(
     vertices: np.ndarray,
