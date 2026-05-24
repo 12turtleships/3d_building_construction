@@ -33,7 +33,7 @@ def reconstruct(
     regularise_footprint: bool = True,
     min_edge_len: float = 0.02,             # drop edges shorter than this (normalised)
     support_radius: float = 0.04,           # tube radius for point-support check
-    min_support: int = 3,                   # min roof points inside tube to keep edge
+    min_support: int = 2,                   # min roof points inside tube to keep edge
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """
     Full pipeline: point cloud → wireframe vertices + edges.
