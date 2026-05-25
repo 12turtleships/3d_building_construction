@@ -135,10 +135,16 @@ def _fit_gable(
     best_alpha_deg = float(result.x)
     best_cost = float(result.fun)
 
-    # Ridge line: centre of rectangle along u, at z = eave + slope * (height/2)
-    alpha = np.radians(best_alpha_deg)
+    alpha  = np.radians(best_alpha_deg)
     eave_z = float(np.percentile(xyz[:, 2], 10))
-    ridge_z = eave_z + np.tan(alpha) * (height / 2.0)
+
+    # Use actual z of points near the ridge centerline (|v_local| < width/4)
+    # rather than tan(α)*dim, which is unreliable with sparse/noisy normals.
+    near_ridge = np.abs(v_local) < (width / 4.0)
+    if near_ridge.sum() >= 2:
+        ridge_z = float(np.percentile(xyz[near_ridge, 2], 90))
+    else:
+        ridge_z = eave_z + np.tan(alpha) * (height / 2.0)
 
     return best_cost, {
         "alpha_deg": best_alpha_deg,
@@ -149,7 +155,7 @@ def _fit_gable(
         "v_hat":     v_hat,
         "width":     width,
         "height":    height,
-        "corners":   None,   # filled by caller
+        "corners":   None,
     }
 
 
@@ -194,9 +200,15 @@ def _fit_hip(
     best_alpha_deg = float(result.x)
     best_cost = float(result.fun)
 
+    alpha  = np.radians(best_alpha_deg)
     eave_z = float(np.percentile(xyz[:, 2], 10))
-    alpha = np.radians(best_alpha_deg)
-    ridge_z = eave_z + np.tan(alpha) * min(width, height) / 2.0
+
+    # Use actual z of points near the roof apex (small |u_local| and |v_local|)
+    near_top = (np.abs(u_local) < height / 4.0) & (np.abs(v_local) < width / 4.0)
+    if near_top.sum() >= 2:
+        ridge_z = float(np.percentile(xyz[near_top, 2], 90))
+    else:
+        ridge_z = eave_z + np.tan(alpha) * min(width, height) / 2.0
 
     return best_cost, {
         "alpha_deg": best_alpha_deg,
@@ -238,30 +250,40 @@ def _wf_flat(corners: np.ndarray, z: float):
 def _wf_gable(corners: np.ndarray, p: dict):
     """
     Gable: ridge along long axis (u).  Vertices at 4 corners (eave) + 2 ridge ends.
+
+    Corners are rebuilt from the frame params so that the orientation is always
+    correct regardless of the winding order in the input `corners` array.
+    Frame convention:  c[0]=-u/-v  c[1]=+u/-v  c[2]=+u/+v  c[3]=-u/+v
     """
-    origin = p["origin"]
-    u_hat  = p["u_hat"]
-    v_hat  = p["v_hat"]
-    width  = p["width"]    # along v (short side)
-    height = p["height"]   # along u (long side)
-    eave_z = p["eave_z"]
+    origin  = p["origin"]
+    u_hat   = p["u_hat"]
+    v_hat   = p["v_hat"]
+    width   = p["width"]    # along v (short axis)
+    height  = p["height"]   # along u (long axis)
+    eave_z  = p["eave_z"]
     ridge_z = p["ridge_z"]
 
-    # 4 corner vertices (eave level)
-    c = corners
+    hu = (height / 2.0) * u_hat
+    hv = (width  / 2.0) * v_hat
+    c = np.array([
+        origin - hu - hv,   # 0: −u, −v
+        origin + hu - hv,   # 1: +u, −v
+        origin + hu + hv,   # 2: +u, +v
+        origin - hu + hv,   # 3: −u, +v
+    ])
+
     verts = [[c[i][0], c[i][1], eave_z] for i in range(4)]
 
-    # 2 ridge endpoints: midpoints of the two short sides, lifted to ridge_z
-    # Short sides connect corners (0,3) and (1,2) respectively
-    r0 = (c[0] + c[3]) / 2.0
-    r1 = (c[1] + c[2]) / 2.0
-    verts.append([r0[0], r0[1], ridge_z])   # idx 4
-    verts.append([r1[0], r1[1], ridge_z])   # idx 5
+    # Ridge endpoints at the ends of the long axis (centre of each short side)
+    r0 = origin - hu   # at −u end
+    r1 = origin + hu   # at +u end
+    verts.append([float(r0[0]), float(r0[1]), ridge_z])   # idx 4
+    verts.append([float(r1[0]), float(r1[1]), ridge_z])   # idx 5
 
     edges = [
         (0, 1), (1, 2), (2, 3), (3, 0),    # eave perimeter
-        (0, 4), (3, 4),                      # one gable end
-        (1, 5), (2, 5),                      # other gable end
+        (0, 4), (3, 4),                      # gable end at −u
+        (1, 5), (2, 5),                      # gable end at +u
         (4, 5),                              # ridge
     ]
     return np.array(verts, dtype=np.float32), edges
@@ -270,47 +292,57 @@ def _wf_gable(corners: np.ndarray, p: dict):
 def _wf_hip(corners: np.ndarray, p: dict):
     """
     Hip: 4 slopes.  Vertices at 4 corners (eave) + ridge line (2 pts) or apex (1 pt).
+
+    Corners rebuilt from frame params (same convention as _wf_gable):
+    c[0]=−u/−v  c[1]=+u/−v  c[2]=+u/+v  c[3]=−u/+v
+    r0 = origin + ridge_half * u_hat  (at +u),  idx 4
+    r1 = origin − ridge_half * u_hat  (at −u),  idx 5
+    Hip edges: +u corners (1,2) → r0 ; −u corners (0,3) → r1
     """
+    origin  = p["origin"]
+    u_hat   = p["u_hat"]
+    v_hat   = p["v_hat"]
     width   = p["width"]
     height  = p["height"]
     eave_z  = p["eave_z"]
     ridge_z = p["ridge_z"]
-    origin  = p["origin"]
-    u_hat   = p["u_hat"]
-    v_hat   = p["v_hat"]
     alpha   = np.radians(p["alpha_deg"])
 
-    c = corners
+    hu = (height / 2.0) * u_hat
+    hv = (width  / 2.0) * v_hat
+    c = np.array([
+        origin - hu - hv,   # 0: −u, −v
+        origin + hu - hv,   # 1: +u, −v
+        origin + hu + hv,   # 2: +u, +v
+        origin - hu + hv,   # 3: −u, +v
+    ])
+
     verts = [[c[i][0], c[i][1], eave_z] for i in range(4)]
 
     half_u = height / 2.0
     half_v = width  / 2.0
 
-    # Ridge runs along u at v=0; its length = height - 2 * (half_v / tan(alpha))
-    hip_run = half_v / np.tan(alpha) if np.tan(alpha) > 1e-6 else half_u
+    hip_run    = half_v / np.tan(alpha) if np.tan(alpha) > 1e-6 else half_u
     ridge_half = max(half_u - hip_run, 0.0)
 
     if ridge_half < 1e-3:
-        # Pyramid: single apex
-        apex_xy = origin + 0.0 * u_hat + 0.0 * v_hat
-        verts.append([float(apex_xy[0]), float(apex_xy[1]), ridge_z])  # idx 4
+        # Pyramid: single apex at centre
+        verts.append([float(origin[0]), float(origin[1]), ridge_z])  # idx 4
         edges = [
             (0, 1), (1, 2), (2, 3), (3, 0),
             (0, 4), (1, 4), (2, 4), (3, 4),
         ]
     else:
-        # Ridge line: two endpoints at ±ridge_half along u
-        centre = origin   # rectangle centre in world coords
-        r0_xy = centre + ridge_half * u_hat
-        r1_xy = centre - ridge_half * u_hat
-        verts.append([float(r0_xy[0]), float(r0_xy[1]), ridge_z])  # idx 4
-        verts.append([float(r1_xy[0]), float(r1_xy[1]), ridge_z])  # idx 5
+        # Ridge: two endpoints along u_hat
+        r0_xy = origin + ridge_half * u_hat   # idx 4, at +u
+        r1_xy = origin - ridge_half * u_hat   # idx 5, at −u
+        verts.append([float(r0_xy[0]), float(r0_xy[1]), ridge_z])
+        verts.append([float(r1_xy[0]), float(r1_xy[1]), ridge_z])
 
-        # Corners to ridge ends (hips)
         edges = [
             (0, 1), (1, 2), (2, 3), (3, 0),   # eave perimeter
-            (0, 4), (1, 4),                     # hips near r0
-            (2, 5), (3, 5),                     # hips near r1
+            (1, 4), (2, 4),                     # hips at +u: corners 1,2 → r0
+            (0, 5), (3, 5),                     # hips at −u: corners 0,3 → r1
             (4, 5),                             # ridge
         ]
 

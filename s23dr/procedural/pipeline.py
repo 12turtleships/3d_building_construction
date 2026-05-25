@@ -42,7 +42,7 @@ def reconstruct(
     min_edge_len: float = 0.02,
     support_radius: float = 0.04,
     min_support: int = 2,
-    max_rects: int = 4,
+    max_rects: int = 1,
     n_cuts: int = 8,
     # Legacy CSG params (ignored, kept for call-site compatibility)
     max_planes: int = 8,
