@@ -1,5 +1,5 @@
 """
-End-to-end procedural roof reconstruction pipeline.
+End-to-end procedural roof reconstruction pipeline (BSP + normal-fit primitives).
 
 reconstruct(xyz, ...)
     → (vertices (V,3), edges list-of-(i,j))
@@ -7,29 +7,26 @@ reconstruct(xyz, ...)
 reconstruct_to_segments(xyz, ...)
     → segments (E, 2, 3)   — ready for hss()
 
-The pipeline runs entirely in normalised coordinate space (xyz_norm).
-
-Architecture (CSG lower-envelope)
-----------------------------------
+Architecture
+------------
 0. Source + vote_frac filters
-1. Ground removal (RANSAC plane on near-horizontal normals)
-2. XY-radius filter (isolate target building)
-3. Multi-plane RANSAC → N roof face planes
-4. Footprint: XY convex hull of filtered points
-5. Lower-envelope CSG: pairwise plane intersections clipped to footprint
-   → ridge / hip / valley edges + eave perimeter
-6. Edge pruning: min-length + point-support
+1. Footprint extraction from filtered cloud (before spatial clipping)
+2. Ground removal + XY-radius filter → roof-face candidate points
+3. Surface normal estimation on filtered points
+4. BSP rectangle decomposition guided by normal-misfit cost
+5. Per-rectangle primitive fitting (flat / gable / hip)
+6. Wireframe generation + concatenation
+7. Edge pruning: min-length + point-support
 """
 
 from __future__ import annotations
 
 import numpy as np
-from shapely.geometry import Point
 
-from .preprocess import extract_roof_points
-from .segment import segment_roof
-from .csg import lower_envelope_wireframe
+from .preprocess import extract_roof_points, estimate_normals
 from .footprint import extract_footprint
+from .decompose import decompose_footprint, mask_in_rect
+from .normal_fit import fit_best, wireframe_from_params, _rect_frame
 
 
 def reconstruct(
@@ -37,7 +34,7 @@ def reconstruct(
     vote_frac: np.ndarray | None = None,   # (N,) float
     valid_mask: np.ndarray | None = None,  # (N,) bool — kept for API compat
     class_id: np.ndarray | None = None,    # (N,) optional semantic labels
-    source: np.ndarray | None = None,      # (N,) uint8 — dataset "source" field
+    source: np.ndarray | None = None,      # (N,) uint8
     target_source: int = 1,
     wall_class_ids: set[int] | None = None,
     z_roof_pct: float = 55.0,             # unused; kept for API compat
@@ -45,12 +42,14 @@ def reconstruct(
     min_edge_len: float = 0.02,
     support_radius: float = 0.04,
     min_support: int = 2,
-    # CSG / segmentation params
+    max_rects: int = 1,
+    n_cuts: int = 8,
+    # Legacy CSG params (ignored, kept for call-site compatibility)
     max_planes: int = 8,
     plane_eps: float = 0.03,
     min_plane_inliers: int = 8,
-    merge_angle_deg: float = 15.0,   # merge faces with normals within this angle
-    merge_dist: float = 0.05,        # merge faces whose points lie within this of each other
+    merge_angle_deg: float = 15.0,
+    merge_dist: float = 0.05,
 ) -> tuple[np.ndarray, list[tuple[int, int]]]:
     """
     Full pipeline: point cloud → wireframe vertices + edges.
@@ -79,49 +78,51 @@ def reconstruct(
             if class_id is not None:
                 class_id = class_id[voted]
 
-    # ── Step 1: footprint + save full cloud for edge support ─────────────────
-    # Footprint uses source+vote filtered cloud before any spatial clipping
-    # so eave/corner points are not stripped.
-    xyz_full = xyz.copy()   # kept for point-support check in edge pruning
+    # ── Step 1: footprint from source+vote filtered cloud ────────────────────
+    # Use the full (unclipped) cloud so eave/corner points are not stripped.
+    xyz_full = xyz.copy()
     footprint = extract_footprint(xyz_full, regularise=regularise_footprint,
                                   z_lo_pct=0.0)
     if footprint is None or footprint.is_empty or footprint.area < 1e-6:
         return np.zeros((0, 3), dtype=np.float32), []
 
-    # ── Step 0c: ground removal + XY filter → roof-face candidate points ────
-    # extract_roof_points: RANSAC ground removal (capped at 40th z-pct to
-    # protect ridge pts) + XY radius clip.  Used only for plane fitting.
-    xyz = extract_roof_points(xyz)
-    if len(xyz) < 5:
+    # ── Step 2: ground removal + XY filter ───────────────────────────────────
+    xyz_roof = extract_roof_points(xyz)
+    if len(xyz_roof) < 5:
         return np.zeros((0, 3), dtype=np.float32), []
 
-    # ── Step 2: multi-plane RANSAC + adjacent-face merging ───────────────────
-    # fit_roof_planes may over-segment (one face → multiple RANSAC hits due to
-    # noise); merge_coplanar collapses nearly-parallel planes whose inlier sets
-    # are spatially consistent into a single SVD-refitted representative plane.
-    planes = segment_roof(
-        xyz,
-        max_planes=max_planes,
-        min_inliers=min_plane_inliers,
-        eps=plane_eps,
-        angle_thresh_deg=merge_angle_deg,
-        dist_thresh=merge_dist,
-    )
+    # ── Step 3: surface normals on filtered points ────────────────────────────
+    normals = estimate_normals(xyz_roof)
 
-    if not planes:
-        # Fallback: treat entire cloud as one flat plane
-        z_med = float(np.median(xyz[:, 2]))
-        planes = [{'n': np.array([0.0, 0.0, 1.0]), 'd': z_med, 'pts': xyz}]
+    # ── Step 4: BSP decomposition ─────────────────────────────────────────────
+    rects = decompose_footprint(footprint, xyz_roof, normals,
+                                max_rects=max_rects, n_cuts=n_cuts)
 
-    # ── Step 3: CSG lower-envelope wireframe ─────────────────────────────────
-    vertices, edges = lower_envelope_wireframe(planes, footprint)
+    # ── Step 5 + 6: primitive fitting → wireframes ────────────────────────────
+    all_verts: list[np.ndarray] = []
+    all_edges: list[tuple[int, int]] = []
 
-    if len(vertices) == 0:
+    for corners in rects:
+        origin, u_hat, v_hat, width, height = _rect_frame(corners)
+        mask = mask_in_rect(xyz_roof, origin, u_hat, v_hat, width, height)
+        pts_r  = xyz_roof[mask]
+        nrm_r  = normals[mask]
+
+        _, rtype, params = fit_best(pts_r, nrm_r, corners)
+
+        verts_r, edges_r = wireframe_from_params(rtype, params, corners)
+        offset = len(all_verts)
+        all_verts.extend(verts_r)
+        all_edges.extend((i + offset, j + offset) for i, j in edges_r)
+
+    if not all_verts:
         return np.zeros((0, 3), dtype=np.float32), []
 
-    # ── Step 4: edge pruning ──────────────────────────────────────────────────
-    # Use xyz_full (pre-ground-removal) so eave edges aren't pruned for having
-    # no support in the ground-removed cloud.
+    vertices = np.array(all_verts, dtype=np.float32)
+    edges = list(set(all_edges))
+
+    # ── Step 7: edge pruning ──────────────────────────────────────────────────
+    # Use xyz_full (pre-ground-removal) so eave edges are not pruned.
     edges = _prune_edges(
         vertices, edges, xyz_full,
         min_len=min_edge_len,
